@@ -20,7 +20,8 @@ from telegram.ext import (
 )
 
 from deps import detect_packages
-from manager import BotManager
+from manager import BotManager, BOTS_DIR
+import persist
 
 # ---------- الإعدادات ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -217,6 +218,7 @@ async def on_document(update: Update, ctx):
             return
         data = await tg_file.download_as_bytearray()
         target.req_file.write_bytes(data)
+        persist.push_bot_async(target)
         await update.message.reply_text(
             f"📦 استلمت requirements بتاعة <b>{esc(target.meta['name'])}</b>\n"
             "⏳ بثبّت المكتبات... (ممكن ياخد دقيقة أو اتنين)", parse_mode=ParseMode.HTML)
@@ -386,8 +388,18 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
-    started = manager.restart_all()
-    print(f"🔁 رجّعت شغل {len(started)} بوت: {started}")
+    # ☁️ استرجاع البوتات من التخزين الدائم (بيحل مشكلة مسح الملفات مع كل نشر)
+    restored = persist.pull_sync(BOTS_DIR)
+    print(f"☁️ استرجعت {restored} ملف من التخزين الدائم" + ("" if persist.ENABLED else " (التخزين الدائم مقفول — ناقص GH_PERSIST_TOKEN/REPO)"))
+
+    # رجّع شغل البوتات اللي كانت شغالة — في الخلفية عشان ما نأخرش الرد على تليجرام
+    def _resume():
+        try:
+            started = manager.restart_all()
+            print(f"🔁 رجّعت شغل {len(started)} بوت: {started}")
+        except Exception as e:
+            print(f"⚠️ resume: {e}")
+    threading.Thread(target=_resume, daemon=True).start()
 
     if RENDER_URL and app.job_queue:
         app.job_queue.run_repeating(self_ping, interval=600, first=120)
