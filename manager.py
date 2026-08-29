@@ -129,6 +129,12 @@ class HostedBot:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.libs_dir.resolve()) if self.libs_dir.exists() else ""
         env["PYTHONUNBUFFERED"] = "1"
+        # نحقن رقم صاحب البوت كأدمن — بوتات كتير (متاجر وغيرها) بتقرا ADMIN_ID من البيئة
+        owner = str(self.meta.get("owner_id") or "")
+        if owner:
+            env["ADMIN_ID"] = owner
+            env["OWNER_ID"] = owner
+            env["ADMIN"] = owner
         # نمسح أسرار البوت المضيف من بيئة البوتات المستضافة
         for k in ("BOT_TOKEN", "GH_PERSIST_TOKEN", "RENDER_API_KEY"):
             env.pop(k, None)
