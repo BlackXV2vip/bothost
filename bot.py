@@ -1,6 +1,6 @@
 # ============================================================
 # بوت هوست 🤖 — بوت تليجرام بيستضيف بوتات بايثون تانية
-# ترفع له ملف .py وهو بيثبّت المكتبات ويشغّله ويدّيك التحكم
+# بيقرا الكود، يكتشف المكتبات لوحده، ويثبتهم بزرار واحد!
 # شغال على Render كـ Web Service + self-ping عشان مينامش
 # ============================================================
 import asyncio
@@ -19,6 +19,7 @@ from telegram.ext import (
     MessageHandler, filters,
 )
 
+from deps import detect_packages
 from manager import BotManager
 
 # ---------- الإعدادات ----------
@@ -33,6 +34,10 @@ MAX_FILE_MB = 1
 ADMIN_FILE = Path("storage/admin.json")
 manager = BotManager(max_bots=MAX_BOTS)
 
+INSTALLING = set()   # بوتات في مرحلة تثبيت حالياً (حماية من الدوس المكرر)
+PENDING_REQS = {}    # مستخدم → البوت اللي مستني منه requirements.txt
+
+
 # ---------- الأدمن ----------
 def load_admins():
     global ADMIN_IDS
@@ -41,6 +46,7 @@ def load_admins():
             ADMIN_IDS |= set(json.loads(ADMIN_FILE.read_text()))
         except Exception:
             pass
+
 
 def save_admin(uid):
     data = []
@@ -54,8 +60,10 @@ def save_admin(uid):
         ADMIN_FILE.parent.mkdir(parents=True, exist_ok=True)
         ADMIN_FILE.write_text(json.dumps(data))
 
+
 def is_admin(uid):
     return uid in ADMIN_IDS
+
 
 load_admins()
 
@@ -84,6 +92,7 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+
 def start_health_server():
     try:
         srv = ThreadingHTTPServer(("0.0.0.0", PORT), Health)
@@ -93,7 +102,7 @@ def start_health_server():
         print(f"⚠️ Health server: {e}")
 
 
-# ---------- self-ping (عشان الخطة المجانية مينامش) ----------
+# ---------- self-ping ----------
 async def self_ping(context: ContextTypes.DEFAULT_TYPE):
     if not RENDER_URL:
         return
@@ -104,21 +113,20 @@ async def self_ping(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# ---------- الأوامر ----------
+# ---------- أوامر ----------
 async def cmd_start(update: Update, ctx):
     was_set = first_admin_hook(update)
-    admin_note = "\n👑 إنت الأدمن الأول — البوت بتاعك دلوقتي!" if was_set else ""
+    admin_note = "\n\n👑 إنت الأدمن الأول — البوت بتاعك دلوقتي!" if was_set else ""
     await update.message.reply_text(
         "🤖 <b>أهلاً في بوت هوست!</b>\n"
-        "البوت ده بيستضيف بوتات بايثون تانية ليك — ترفع الملف وهو بيوصّلها شغالة.\n\n"
-        "📌 <b>الطريقة:</b>\n"
-        "1️⃣ ابعت ملف <code>.py</code> (كود البوت بتاعك)\n"
-        "2️⃣ لو بوتك محتاج مكتبات، ابعت <code>requirements.txt</code>\n"
-        "3️⃣ البوت هيثبّت المكتبات ويشغّل بوتك ويديك أزرار التحكم\n\n"
+        "ابعت لي ملف بوت بايثون وأنا:\n"
+        "🔍 أقرا الكود وأكتشف المكتبات المطلوبة لوحدي\n"
+        "📦 أثبتهم بزرار واحدة\n"
+        "▶️ أشغّل بوتك وأديك أزرار تحكم كاملة\n\n"
         "🛠 <b>الأوامر:</b>\n"
-        "/mybots — البوتات بتاعتك وحالتها\n"
+        "/mybots — بوتاتك وحالتها\n"
         "/id — رقمك على تليجرام\n"
-        "/help — المساعدة" + admin_note,
+        "/help — إزاي تستخدمه بالتفصيل" + admin_note,
         parse_mode=ParseMode.HTML,
     )
 
@@ -126,16 +134,17 @@ async def cmd_start(update: Update, ctx):
 async def cmd_help(update: Update, ctx):
     await update.message.reply_text(
         "ℹ️ <b>إزاي تستضيف بوتك؟</b>\n\n"
-        "1️⃣ ارفع ملف <code>.py</code> — يكون فيه الكود اللي بيشتغل على طول "
-        "(مثلاً بوت تليجرام بينفذ <code>run_polling()</code> أو لوب لا نهائي)\n"
-        "2️⃣ لو محتاج مكتبات (زي python-telegram-bot) ابععت ملف "
-        "<code>requirements.txt</code> فيه أسماءها\n"
-        "3️⃣ استنى التثبيت والتشغيل — وشوف اللوج للتأكد\n\n"
+        "1️⃣ ابععت ملف <code>.py</code> — أنا بقراه وأطلع المكتبات اللي محتاجها <b>تلقائياً</b>\n"
+        "2️⃣ تدوس <b>«📦 ثبّتها وشغّل»</b> — وأنا بثبّت كل المكتبات وأشغّل بوتك\n"
+        "3️⃣ أو لو عايز تكتب requirements بنفسك ابعت <code>requirements.txt</code>\n\n"
+        "🎯 <b>بعد التشغيل تتحكم بأزرار:</b>\n"
+        "▶️ تشغيل • ⏹ إيقاف • 📜 اللوج • ♻️ إعادة تثبيت المكتبات • 🗑 حذف\n\n"
         "⚠️ <b>حدود:</b>\n"
         f"• أقصى حجم للملف {MAX_FILE_MB} ميجا\n"
-        f"• كل بوت ليه حد ذاكرة 150 ميجا\n"
-        f"• أقصى عدد بوتات {MAX_BOTS}\n"
-        "• التثبيت بياخد أقصى 5 دقايق",
+        "• كل بوت ليه حد ذاكرة 150 ميجا\n"
+        f"• أقصى عدد بوتات {MAX_BOTS} (وبوتين لكل مستخدم)\n"
+        "• التثبيت بياخد أقصى 5 دقايق\n"
+        "• لو بوتك بيستورد ملفات جنبانه (config وغيرها) ابعت requirements يدوي وأسم الكود المحلي مش هيتبث",
         parse_mode=ParseMode.HTML,
     )
 
@@ -145,27 +154,26 @@ async def cmd_id(update: Update, ctx):
     await update.message.reply_text(f"🆔 رقمك: <code>{u.id}</code>", parse_mode=ParseMode.HTML)
 
 
-def bot_card(b, with_buttons=True):
+# ---------- كارت البوت ----------
+def bot_card(b):
     status = "🟢 شغال" if b.running else "🔴 واقف"
     txt = (
         f"🤖 <b>{esc(b.meta['name'])}</b>\n"
         f"🆔 <code>{b.id}</code>\n"
         f"الحالة: {status}\n"
-        f"📦 مكتبات: {'✅' if b.req_file.exists() else '❌'}"
+        f"📦 مكتبات: {'✅ متثبتة' if b.libs_dir.exists() else ('📝 مطلوبة' if b.req_file.exists() else '❌ مفيش')}"
     )
-    kb = None
-    if with_buttons:
-        rows = []
-        if b.running:
-            rows.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{b.id}")])
-        else:
-            rows.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"run_{b.id}")])
-        rows.append([
-            InlineKeyboardButton("📜 اللوج", callback_data=f"logs_{b.id}"),
-            InlineKeyboardButton("🗑 حذف", callback_data=f"del_{b.id}"),
-        ])
-        kb = InlineKeyboardMarkup(rows)
-    return txt, kb
+    rows = []
+    if b.running:
+        rows.append([InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{b.id}")])
+    else:
+        rows.append([InlineKeyboardButton("▶️ تشغيل", callback_data=f"run_{b.id}")])
+    second = [InlineKeyboardButton("📜 اللوج", callback_data=f"logs_{b.id}")]
+    if b.req_file.exists():
+        second.append(InlineKeyboardButton("♻️ المكتبات", callback_data=f"inst_{b.id}"))
+    second.append(InlineKeyboardButton("🗑 حذف", callback_data=f"del_{b.id}"))
+    rows.append(second)
+    return txt, InlineKeyboardMarkup(rows)
 
 
 async def cmd_mybots(update: Update, ctx):
@@ -179,6 +187,7 @@ async def cmd_mybots(update: Update, ctx):
         await update.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
+# ---------- استقبال الملفات ----------
 async def on_document(update: Update, ctx):
     u = update.effective_user
     first_admin_hook(update)
@@ -195,27 +204,29 @@ async def on_document(update: Update, ctx):
 
     tg_file = await doc.get_file()
 
-    # ملف requirements.txt
+    # ----- ملف requirements.txt -----
     if name.lower() == "requirements.txt":
-        target = next((b for b in manager.list_bots(u.id if not is_admin(u.id) else None)
-                       if not b.req_file.exists()), None)
+        target = None
+        if u.id in PENDING_REQS:
+            target = manager.get(PENDING_REQS.pop(u.id))
         if target is None:
-            await update.message.reply_text(
-                " ℹ️ ابععت ملف البوت .py الأول، وبعدين requirements.txt")
+            target = next((b for b in manager.list_bots(u.id if not is_admin(u.id) else None)
+                           if not b.req_file.exists()), None)
+        if target is None:
+            await update.message.reply_text("ℹ️ ابععت ملف البوت .py الأول، وبعدين requirements.txt")
             return
         data = await tg_file.download_as_bytearray()
         target.req_file.write_bytes(data)
         await update.message.reply_text(
             f"📦 استلمت requirements بتاعة <b>{esc(target.meta['name'])}</b>\n"
-            "⏳ بثبّت المكتبات... (ممكن ياخد دقيقة)", parse_mode=ParseMode.HTML)
+            "⏳ بثبّت المكتبات... (ممكن ياخد دقيقة أو اتنين)", parse_mode=ParseMode.HTML)
         ok, out = await asyncio.to_thread(target.install)
         if not ok:
             await update.message.reply_text(
                 f"❌ فشل التثبيت:\n<code>{esc(out[-800:])}</code>\n\nصلّح الملف وابعته تاني",
                 parse_mode=ParseMode.HTML)
             return
-        was_running = target.meta.get("auto_run")
-        if was_running:
+        if target.meta.get("auto_run"):
             target.stop()
         ok2, _ = target.start()
         await update.message.reply_text(
@@ -223,7 +234,7 @@ async def on_document(update: Update, ctx):
             parse_mode=ParseMode.HTML)
         return
 
-    # ملف بايثون — بوت جديد
+    # ----- ملف بايثون: بوت جديد -----
     if not name.lower().endswith(".py"):
         await update.message.reply_text("🤔 ابعت ملف .py أو requirements.txt")
         return
@@ -234,14 +245,44 @@ async def on_document(update: Update, ctx):
         await update.message.reply_text(f"⚠️ {err}")
         return
 
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("▶️ شغّله من غير مكتبات", callback_data=f"run_{bot.id}"),
-        InlineKeyboardButton("📦 هبعت requirements", callback_data=f"waitreq_{bot.id}"),
-    ]])
-    await update.message.reply_text(
-        f"✅ استلمت <b>{esc(name)}</b>\n🆔 الكود: <code>{bot.id}</code>\n\n"
-        "البوت بتاعك محتاج مكتبات خارجية؟",
-        parse_mode=ParseMode.HTML, reply_markup=kb)
+    # 🔍 الاكتشاف التلقائي للمكتبات
+    pkgs = detect_packages(bytes(data).decode("utf-8", errors="replace"))
+
+    if pkgs:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"📦 ثبّتها وشغّل ({len(pkgs)} مكتبة)", callback_data=f"inst_{bot.id}")],
+            [
+                InlineKeyboardButton("⚡️ شغّل من غير تثبيت", callback_data=f"run_{bot.id}"),
+                InlineKeyboardButton("📝 هكتبها بنفسي", callback_data=f"waitreq_{bot.id}"),
+            ],
+        ])
+        await update.message.reply_text(
+            f"✅ استلمت <b>{esc(name)}</b>\n"
+            f"🔍 <b>لقيت المكتبات دي في الكود:</b>\n"
+            f"<code>{esc(', '.join(pkgs))}</code>\n\n"
+            "دوس الزرار وأنا أثبتهم وأشغّل بوتك لوحدي 👇",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ شغّله على طول", callback_data=f"run_{bot.id}")]])
+        await update.message.reply_text(
+            f"✅ استلمت <b>{esc(name)}</b>\n"
+            "😎 <b>الكود ده محتاج مكتبات قياسية بس — مش محتاج تثبيت!</b>\n"
+            "تشتغل دلوقتي؟",
+            parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+# ---------- تشغيل بعد ما يثبت (مشترك) ----------
+async def start_and_report(q, b):
+    ok, _msg = b.start()
+    await asyncio.sleep(2)
+    alive = b.running
+    txt, kb = bot_card(b)
+    note = ""
+    if ok and not alive:
+        note = "\n\n⚠️ <b>البوت وقع بعد التشغيل!</b> افتح اللوج وشوف السبب"
+    elif ok and alive:
+        note = "\n\n🟢 <b>شغال دلوقتي!</b>"
+    await q.edit_message_text(txt + note, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 # ---------- الأزرار ----------
@@ -266,20 +307,50 @@ async def on_button(update: Update, ctx):
                 await q.edit_message_text(
                     f"❌ فشل تثبيت المكتبات:\n<code>{esc(out[-800:])}</code>", parse_mode=ParseMode.HTML)
                 return
-        ok, msg = b.start()
-        import time as _t
-        await asyncio.sleep(2)  # نبص البوت يشتغل أو يقع
-        alive = b.running
-        txt, kb = bot_card(b)
-        note = ""
-        if ok and not alive:
-            note = "\n\n⚠️ <b>البوت وقع بعد التشغيل!</b> افتح اللوج وشوف السبب"
-        await q.edit_message_text(txt + note, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await start_and_report(q, b)
+
+    elif action == "inst":
+        # 📦 زرار التثبيت التلقائي — بتكتب requirements من الاكتشاف وبتثبت وبتشغل
+        if b.id in INSTALLING:
+            await q.answer("⏳ التثبيت شغال خلاص — استنى شوية", show_alert=True)
+            return
+        INSTALLING.add(b.id)
+        try:
+            # لو مفيش requirements محفوظ: نكتبه من اكتشاف الكود
+            if not b.req_file.exists():
+                pkgs = detect_packages(b.main_file.read_text(encoding="utf-8", errors="replace"))
+                if pkgs:
+                    b.req_file.write_text("\n".join(pkgs) + "\n", encoding="utf-8")
+                    pkg_list = esc(", ".join(pkgs))
+                else:
+                    pkg_list = ""
+            else:
+                pkg_list = "المكتبات المطلوبة مكتوبة في requirements"
+
+            await q.edit_message_text(
+                f"📦 <b>بتثبّت المكتبات بتاعة {esc(b.meta['name'])}...</b>\n"
+                f"<code>{pkg_list}</code>\n\n"
+                "⏳ استنى — أقصى مدة 5 دقايق", parse_mode=ParseMode.HTML)
+
+            ok, out = await asyncio.to_thread(b.install)
+            if not ok:
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 جرّب تاني", callback_data=f"inst_{b.id}"),
+                    InlineKeyboardButton("📝 هكتبها بنفسي", callback_data=f"waitreq_{b.id}"),
+                ]])
+                await q.edit_message_text(
+                    f"❌ <b>فشل التثبيت:</b>\n<code>{esc(out[-700:])}</code>",
+                    parse_mode=ParseMode.HTML, reply_markup=kb)
+                return
+            await start_and_report(q, b)
+        finally:
+            INSTALLING.discard(b.id)
 
     elif action == "waitreq":
+        PENDING_REQS[uid] = b.id
         await q.edit_message_text(
             f"📦 تمام — ابعت دلوقتي ملف <code>requirements.txt</code>\n"
-            f"(الكود: <code>{b.id}</code>)",
+            f"وهيتثبت لـ <b>{esc(b.meta['name'])}</b> على طول",
             parse_mode=ParseMode.HTML)
 
     elif action == "stop":
@@ -296,6 +367,7 @@ async def on_button(update: Update, ctx):
 
     elif action == "del":
         b.delete()
+        PENDING_REQS.pop(uid, None)
         await q.edit_message_text("🗑 البوت اتمسح خلاص")
 
 
@@ -307,18 +379,16 @@ def main():
     start_health_server()
 
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler(["start", "help2"], cmd_start))
+    app.add_handler(CommandHandler(["start"], cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("mybots", cmd_mybots))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
-    # إعادة تشغيل البوتات المحفوظة
     started = manager.restart_all()
     print(f"🔁 رجّعت شغل {len(started)} بوت: {started}")
 
-    # self-ping كل 10 دقايق
     if RENDER_URL and app.job_queue:
         app.job_queue.run_repeating(self_ping, interval=600, first=120)
         print(f"🔄 self-ping مفعّل على {RENDER_URL}")
