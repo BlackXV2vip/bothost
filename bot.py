@@ -13,7 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup, Update,
+    BotCommand,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -100,6 +103,24 @@ def fmt_uptime():
 
 
 # ============================================================
+# القائمة الرئيسية الدائمة (كيبورد ملون بدل الأوامر)
+# ============================================================
+def main_menu_kb(admin=False):
+    rows = [[KeyboardButton("بوتاتي", style="primary")]]
+    if admin:
+        rows.append([KeyboardButton("لوحة التحكم", style="primary")])
+    rows.append([KeyboardButton("المساعدة")])
+    return ReplyKeyboardMarkup(
+        rows, resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="ابعت ملف .py أو zip...")
+
+
+def back_kb():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("رجوع", callback_data="panel")]])
+
+
+# ============================================================
 # سيرفر الصحة
 # ============================================================
 class Health(BaseHTTPRequestHandler):
@@ -137,7 +158,8 @@ async def self_ping(context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 async def cmd_start(update: Update, ctx):
     was_set = first_admin_hook(update)
-    admin_note = "\n\n👑 إنت الأدمن — جرب /panel للوحة التحكم!" if was_set else ""
+    admin = is_admin(update.effective_user.id)
+    admin_note = "\n\n👑 إنت الأدمن — جرب لوحة التحكم من الكيبورد تحت!" if was_set or admin else ""
     await update.message.reply_text(
         "🤖 <b>أهلاً في بوت هوست v3!</b>\n"
         "منصة كاملة لاستضافة بوتات بايثون:\n\n"
@@ -146,9 +168,9 @@ async def cmd_start(update: Update, ctx):
         "🔍 بأقرا الكود وأكتشف المكتبات لوحدي\n"
         "🖱 زرار واحدة بتثبت كل حاجة وتشغّل\n"
         "☁️ بوتاتك محفوظة على السحابة ما بتمسحش\n\n"
-        "🛠 <b>الأوامر:</b>\n"
-        "/mybots — بوتاتك • /help — الشرح • /id — رقمك" + admin_note,
+        "استخدم الكيبورد اللي تحت للتنقل 👇" + admin_note,
         parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb(admin),
     )
 
 
@@ -201,21 +223,21 @@ def bot_card(b, admin_view=False):
     rows = []
     if b.running:
         rows.append([
-            InlineKeyboardButton("⏹ إيقاف", callback_data=f"stop_{b.id}"),
-            InlineKeyboardButton("🔄 إعادة", callback_data=f"rst_{b.id}"),
+            InlineKeyboardButton("إيقاف", callback_data=f"stop_{b.id}", style="danger"),
+            InlineKeyboardButton("إعادة تشغيل", callback_data=f"rst_{b.id}", style="primary"),
         ])
     else:
         rows.append([
-            InlineKeyboardButton("▶️ تشغيل", callback_data=f"run_{b.id}"),
-            InlineKeyboardButton("🔄 إعادة", callback_data=f"rst_{b.id}"),
+            InlineKeyboardButton("تشغيل", callback_data=f"run_{b.id}", style="success"),
+            InlineKeyboardButton("إعادة تشغيل", callback_data=f"rst_{b.id}", style="primary"),
         ])
-    second = [InlineKeyboardButton("📜 اللوج", callback_data=f"logs_{b.id}")]
+    second = [InlineKeyboardButton("اللوج", callback_data=f"logs_{b.id}", style="primary")]
     if b.req_file.exists():
-        second.append(InlineKeyboardButton("♻️ مكتبات", callback_data=f"inst_{b.id}"))
-    second.append(InlineKeyboardButton("🗑 حذف", callback_data=f"del_{b.id}"))
+        second.append(InlineKeyboardButton("المكتبات", callback_data=f"inst_{b.id}", style="primary"))
+    second.append(InlineKeyboardButton("حذف", callback_data=f"del_{b.id}", style="danger"))
     rows.append(second)
     if admin_view:
-        rows.append([InlineKeyboardButton("🔙 للوحة التحكم", callback_data="pbots")])
+        rows.append([InlineKeyboardButton("للوحة التحكم", callback_data="pbots_0")])
     return txt, InlineKeyboardMarkup(rows)
 
 
@@ -262,15 +284,15 @@ def panel_text():
 def panel_kb():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 إحصائيات", callback_data="pstats"),
-            InlineKeyboardButton("📋 البوتات", callback_data="pbots_0"),
+            InlineKeyboardButton("إحصائيات", callback_data="pstats", style="primary"),
+            InlineKeyboardButton("البوتات", callback_data="pbots_0", style="primary"),
         ],
         [
-            InlineKeyboardButton("🖥 النظام", callback_data="psys"),
-            InlineKeyboardButton("🧰 صيانة", callback_data="pmaint"),
+            InlineKeyboardButton("النظام", callback_data="psys", style="primary"),
+            InlineKeyboardButton("صيانة", callback_data="pmaint"),
         ],
-        [InlineKeyboardButton("📢 إذاعة للمستخدمين", callback_data="pbcast")],
-        [InlineKeyboardButton("🔄 تحديث اللوحة", callback_data="panel")],
+        [InlineKeyboardButton("إذاعة للمستخدمين", callback_data="pbcast", style="primary")],
+        [InlineKeyboardButton("تحديث اللوحة", callback_data="panel")],
     ])
 
 
@@ -289,28 +311,28 @@ def bots_page_kb(page):
     chunk = bots[page * per:(page + 1) * per]
     rows = []
     for b in chunk:
-        emoji = "🟢" if b.running else "🔴"
         rows.append([InlineKeyboardButton(
-            f"{emoji} {b.meta.get('name', b.id)[:22]}",
-            callback_data=f"pbot_{b.id}")])
+            b.meta.get('name', b.id)[:24],
+            callback_data=f"pbot_{b.id}",
+            style="success" if b.running else "danger")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("◀️", callback_data=f"pbots_{page-1}"))
+        nav.append(InlineKeyboardButton("السابق", callback_data=f"pbots_{page-1}"))
     nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="noop"))
     if page < pages - 1:
-        nav.append(InlineKeyboardButton("▶️", callback_data=f"pbots_{page+1}"))
+        nav.append(InlineKeyboardButton("التالي", callback_data=f"pbots_{page+1}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("🔙 اللوحة", callback_data="panel")])
+    rows.append([InlineKeyboardButton("رجوع للوحة", callback_data="panel")])
     return f"📋 <b>كل البوتات ({len(bots)})</b> — دوس على بوت للتحكم", InlineKeyboardMarkup(rows)
 
 
 def maint_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 إعادة تشغيل الشغالين", callback_data="mrestart")],
-        [InlineKeyboardButton("⏹ إيقاف الكل", callback_data="mstopall")],
-        [InlineKeyboardButton("☁️ مزامنة الكل للسحابة", callback_data="msync")],
-        [InlineKeyboardButton("🔙 اللوحة", callback_data="panel")],
+        [InlineKeyboardButton("إعادة تشغيل الشغالين", callback_data="mrestart", style="primary")],
+        [InlineKeyboardButton("إيقاف الكل", callback_data="mstopall", style="danger")],
+        [InlineKeyboardButton("مزامنة الكل للسحابة", callback_data="msync", style="success")],
+        [InlineKeyboardButton("رجوع للوحة", callback_data="panel")],
     ])
 
 
@@ -321,10 +343,10 @@ async def _offer_start(b, pkgs, extra=""):
     """شاشة ما بعد الرفع: أزرار التثبيت/التشغيل."""
     if pkgs:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"📦 ثبّتها وشغّل ({len(pkgs)} مكتبة)", callback_data=f"inst_{b.id}")],
+            [InlineKeyboardButton(f"ثبّتها وشغّل ({len(pkgs)} مكتبة)", callback_data=f"inst_{b.id}", style="success")],
             [
-                InlineKeyboardButton("⚡️ من غير تثبيت", callback_data=f"run_{b.id}"),
-                InlineKeyboardButton("📝 هكتبها بنفسي", callback_data=f"waitreq_{b.id}"),
+                InlineKeyboardButton("من غير تثبيت", callback_data=f"run_{b.id}", style="primary"),
+                InlineKeyboardButton("هكتبها بنفسي", callback_data=f"waitreq_{b.id}"),
             ],
         ])
         await b._msg.reply_text(
@@ -333,7 +355,7 @@ async def _offer_start(b, pkgs, extra=""):
             "دوس الزرار وأنا أثبتهم وأشغّل 👇",
             parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ شغّله على طول", callback_data=f"run_{b.id}")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("شغّله على طول", callback_data=f"run_{b.id}", style="success")]])
         await b._msg.reply_text(
             f"✅ استلمت <b>{esc(b.meta['name'])}</b>{extra}\n"
             "😎 محتاج مكتبات قياسية بس — جاهز للتشغيل الفوري!",
@@ -439,12 +461,29 @@ async def tg_download(doc):
 # ============================================================
 async def on_text(update: Update, ctx):
     u = update.effective_user
+    t = (update.message.text or "").strip()
+
+    # ===== أزرار القائمة الرئيسية الدائمة =====
+    if t == "بوتاتي":
+        await cmd_mybots(update, ctx)
+        return
+    if t == "المساعدة":
+        await cmd_help(update, ctx)
+        return
+    if t == "لوحة التحكم":
+        if is_admin(u.id):
+            await cmd_panel(update, ctx)
+        else:
+            await update.message.reply_text("⛔️ دي للأدمن بس")
+        return
+
+    # ===== نص الإذاعة =====
     if u.id in PENDING_BCAST:
         PENDING_BCAST.discard(u.id)
         BCAST_DRAFT[u.id] = update.message.text
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ ابعتها", callback_data="bcast_go"),
-            InlineKeyboardButton("❌ إلغاء", callback_data="bcast_no"),
+            InlineKeyboardButton("ابعتها", callback_data="bcast_go", style="success"),
+            InlineKeyboardButton("إلغاء", callback_data="bcast_no", style="danger"),
         ]])
         await update.message.reply_text(
             f"📢 <b>معاينة الإذاعة:</b>\n\n{esc(update.message.text)}\n\nتبعت؟",
@@ -657,8 +696,8 @@ async def on_button(update: Update, ctx):
             ok, out = await asyncio.to_thread(b.install)
             if not ok:
                 kb = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 جرّب تاني", callback_data=f"inst_{b.id}"),
-                    InlineKeyboardButton("📝 هكتبها بنفسي", callback_data=f"waitreq_{b.id}"),
+                    InlineKeyboardButton("جرّب تاني", callback_data=f"inst_{b.id}", style="primary"),
+                    InlineKeyboardButton("هكتبها بنفسي", callback_data=f"waitreq_{b.id}"),
                 ]])
                 await q.edit_message_text(
                     f"❌ <b>فشل التثبيت:</b>\n<code>{esc(out[-700:])}</code>",
@@ -701,7 +740,17 @@ def main():
 
     start_health_server()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    async def post_init(app):
+        # قائمة أوامر نظيفة جنب مربع الكتابة
+        await app.bot.set_my_commands([
+            BotCommand("start", "القائمة الرئيسية"),
+            BotCommand("mybots", "بوتاتك"),
+            BotCommand("help", "الدليل"),
+            BotCommand("id", "رقمك"),
+            BotCommand("panel", "لوحة التحكم (أدمن)"),
+        ])
+
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
