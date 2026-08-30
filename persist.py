@@ -57,6 +57,13 @@ def push_bot_sync(bot):
     if not ENABLED:
         return
     files = [bot.meta.get("file", "main.py"), *KEEP_FILES]
+    # بيانات البوتات (users_data.json وغيرها) بتترفع برضه — حفظ دائم
+    try:
+        extra = [p.name for p in bot.dir.iterdir()
+                 if p.is_file() and p.suffix == ".json" and p.name not in files]
+        files.extend(extra)
+    except Exception:
+        pass
     for rel in files:
         p = bot.dir / rel
         if not p.exists():
