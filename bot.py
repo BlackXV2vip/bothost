@@ -159,6 +159,18 @@ async def self_ping(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+# مزامنة دورية لبيانات البوتات الشغالة (حتى ما تضيعش مع أي إعادة نشر)
+async def sync_data_job(context: ContextTypes.DEFAULT_TYPE):
+    if not persist.ENABLED:
+        return
+    try:
+        for b in manager.list_bots():
+            if b.running:
+                await asyncio.to_thread(persist.push_bot_sync, b, True)
+    except Exception as e:
+        print(f"⚠️ sync_data_job: {e}")
+
+
 # ============================================================
 # أوامر عامة
 # ============================================================
@@ -817,6 +829,8 @@ def main():
     if RENDER_URL and app.job_queue:
         app.job_queue.run_repeating(self_ping, interval=600, first=120)
         print(f"🔄 self-ping على {RENDER_URL}")
+        app.job_queue.run_repeating(sync_data_job, interval=300, first=180)
+        print("☁️ مزامنة بيانات دورية كل 5 دقايق")
 
     print("🤖 بوت هوست v3 شغال!")
     app.run_polling(allowed_updates=["message", "callback_query"])

@@ -52,11 +52,11 @@ def _bot_main_file(bot_dir, meta):
     return meta.get("file", "main.py")
 
 
-def push_bot_sync(bot):
-    """رفع ملفات بوت واحد للريبو (متزامن)."""
+def push_bot_sync(bot, data_only=False):
+    """رفع ملفات بوت واحد للريبو (متزامن). data_only=بيانات بس (للمزامنة الدورية)."""
     if not ENABLED:
         return
-    files = [bot.meta.get("file", "main.py"), *KEEP_FILES]
+    files = [] if data_only else [bot.meta.get("file", "main.py"), *KEEP_FILES]
     # بيانات البوتات (users_data.json وغيرها) بتترفع برضه — حفظ دائم
     try:
         extra = [p.name for p in bot.dir.iterdir()
