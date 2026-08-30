@@ -13,10 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
-from telegram import (
-    InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup, Update,
-    BotCommand,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand, ReplyKeyboardRemove
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -103,21 +100,30 @@ def fmt_uptime():
 
 
 # ============================================================
-# القائمة الرئيسية الدائمة (كيبورد ملون بدل الأوامر)
+# القائمة الرئيسية — أزرار inline تحت الرسايل
 # ============================================================
-def main_menu_kb(admin=False):
-    rows = [[KeyboardButton("بوتاتي", style="primary")]]
+MENU_TEXT = "🤖 <b>بوت هوست — القائمة الرئيسية</b>\nاختار من الأزرار تحت 👇"
+
+
+def menu_kb(admin=False):
+    rows = [[InlineKeyboardButton("بوتاتي", callback_data="ubots", style="primary")]]
     if admin:
-        rows.append([KeyboardButton("لوحة التحكم", style="primary")])
-    rows.append([KeyboardButton("المساعدة")])
-    return ReplyKeyboardMarkup(
-        rows, resize_keyboard=True, is_persistent=True,
-        input_field_placeholder="ابعت ملف .py أو zip...")
+        rows.append([InlineKeyboardButton("لوحة التحكم", callback_data="panel", style="primary")])
+    rows.append([InlineKeyboardButton("المساعدة", callback_data="uhelp")])
+    return InlineKeyboardMarkup(rows)
 
 
-def back_kb():
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("رجوع", callback_data="panel")]])
+def user_bots_kb(uid):
+    bots = manager.list_bots(uid if not is_admin(uid) else None)
+    rows = []
+    for b in bots:
+        rows.append([InlineKeyboardButton(
+            b.meta.get("name", b.id)[:24],
+            callback_data=f"ubot_{b.id}",
+            style="success" if b.running else "danger")])
+    rows.append([InlineKeyboardButton("القائمة الرئيسية", callback_data="umenu")])
+    return bots, InlineKeyboardMarkup(rows)
+
 
 
 # ============================================================
@@ -159,18 +165,19 @@ async def self_ping(context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, ctx):
     was_set = first_admin_hook(update)
     admin = is_admin(update.effective_user.id)
-    admin_note = "\n\n👑 إنت الأدمن — جرب لوحة التحكم من الكيبورد تحت!" if was_set or admin else ""
+    admin_note = "\n👑 إنت الأدمن في المنصة" if was_set or admin else ""
+    # نشيل أي كيبورد قديم من النسخ اللي فاتت
+    await update.message.reply_text("✨", reply_markup=ReplyKeyboardRemove())
     await update.message.reply_text(
         "🤖 <b>أهلاً في بوت هوست v3!</b>\n"
-        "منصة كاملة لاستضافة بوتات بايثون:\n\n"
+        "منصة استضافة بوتات بايثون كاملة:\n\n"
         "📄 ابعت ملف <code>.py</code> — بوت بمكتباته\n"
-        "📦 أو ملف <code>zip</code> — <b>مشروع كامل بملفات متعددة!</b>\n\n"
-        "🔍 بأقرا الكود وأكتشف المكتبات لوحدي\n"
-        "🖱 زرار واحدة بتثبت كل حاجة وتشغّل\n"
-        "☁️ بوتاتك محفوظة على السحابة ما بتمسحش\n\n"
-        "استخدم الكيبورد اللي تحت للتنقل 👇" + admin_note,
+        "📦 أو <code>zip</code> — مشروع كامل بملفات متعددة\n\n"
+        "🔍 بأكتشف المكتبات لوحدي وأثبتهم بزرار واحدة\n"
+        "☁️ بوتاتك محفوظة على السحابة\n"
+        "استخدم الأزرار تحت الرسالة للتنقل 👇" + admin_note,
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(admin),
+        reply_markup=menu_kb(admin),
     )
 
 
@@ -238,6 +245,8 @@ def bot_card(b, admin_view=False):
     rows.append(second)
     if admin_view:
         rows.append([InlineKeyboardButton("للوحة التحكم", callback_data="pbots_0")])
+    else:
+        rows.append([InlineKeyboardButton("لبوتاتي", callback_data="ubots")])
     return txt, InlineKeyboardMarkup(rows)
 
 
@@ -298,7 +307,10 @@ def panel_kb():
 
 async def cmd_panel(update: Update, ctx):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔️ دي للأدمن بس")
+        await update.message.reply_text(
+            f"⛔️ دي للأدمن بس.\nرقمك: <code>{update.effective_user.id}</code>\n"
+            "لو ده رقمك الصحيح ابعته لمطور البوت يضيفه.",
+            parse_mode=ParseMode.HTML)
         return
     await update.message.reply_text(
         panel_text(), parse_mode=ParseMode.HTML, reply_markup=panel_kb())
@@ -461,21 +473,6 @@ async def tg_download(doc):
 # ============================================================
 async def on_text(update: Update, ctx):
     u = update.effective_user
-    t = (update.message.text or "").strip()
-
-    # ===== أزرار القائمة الرئيسية الدائمة =====
-    if t == "بوتاتي":
-        await cmd_mybots(update, ctx)
-        return
-    if t == "المساعدة":
-        await cmd_help(update, ctx)
-        return
-    if t == "لوحة التحكم":
-        if is_admin(u.id):
-            await cmd_panel(update, ctx)
-        else:
-            await update.message.reply_text("⛔️ دي للأدمن بس")
-        return
 
     # ===== نص الإذاعة =====
     if u.id in PENDING_BCAST:
@@ -540,6 +537,52 @@ async def on_button(update: Update, ctx):
     await q.answer()
     uid = q.from_user.id
     data = q.data
+
+    # ---------- قائمة المستخدم الرئيسية ----------
+    if data == "umenu":
+        await q.edit_message_text(
+            MENU_TEXT, parse_mode=ParseMode.HTML, reply_markup=menu_kb(is_admin(uid)))
+        return
+
+    if data == "uhelp":
+        await q.edit_message_text(
+            "ℹ️ <b>الدليل السريع</b>\n\n"
+            "1️⃣ ابعت <code>.py</code> أو <code>zip</code>\n"
+            "2️⃣ أدوس «ثبّتها وشغّل»\n"
+            "3️⃣ تحكم بأزرار كل بوت: تشغيل/إيقاف/لوج/حذف\n\n"
+            "⚡ الحدود: 8 بوتات (3 لكل مستخدم) • 4 شغالة مع بعض\n"
+            "☁️ بوتاتك بترجع لوحدها بعد أي صيانة",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("القائمة الرئيسية", callback_data="umenu")]]))
+        return
+
+    if data == "ubots":
+        bots, kb = user_bots_kb(uid)
+        if not bots:
+            await q.edit_message_text(
+                "📭 مفيش بوتات لسه!\nابععت ملف .py أو zip وهنبدأ 🚀",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("القائمة الرئيسية", callback_data="umenu")]]))
+        else:
+            running = sum(1 for b in bots if b.running)
+            await q.edit_message_text(
+                f"🤖 <b>بوتاتك ({len(bots)}) — شغال {running} 🟢</b>\nاختار بوت للتحكم:",
+                parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
+
+    if data.startswith("ubot_"):
+        b = manager.get(data.split("_", 1)[1])
+        if not b:
+            await q.edit_message_text("⚠️ البوت ده اتمسح")
+            return
+        if not (is_admin(uid) or b.meta.get("owner_id") == uid):
+            await q.answer("⛔️ ده مش بوتك!", show_alert=True)
+            return
+        txt, kb = bot_card(b, admin_view=False)
+        await q.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+        return
 
     # ---------- لوحة الأدمن ----------
     if data == "noop":
