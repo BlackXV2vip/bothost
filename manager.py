@@ -1,14 +1,17 @@
 # ============================================================
-# مدير استضافة البوتات — تتبع حقيقي بالـ PID + تخزين دائم
+# مدير استضافة البوتات v3 — تتبع PID + تخزين دائم + مشاريع كاملة
 # ============================================================
+import io
 import json
 import os
+import random
 import resource
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import persist
@@ -20,6 +23,10 @@ BOTS_DIR.mkdir(parents=True, exist_ok=True)
 INSTALL_TIMEOUT = 300      # أقصى مدة تثبيت مكتبات (ثواني)
 MEM_LIMIT_MB = 150         # أقصى ذاكرة لبوت واحد
 MAX_LOG_BYTES = 100_000    # أقصى حجم لوج محفوظ
+
+# حدود مشاريع الـ zip
+ZIP_MAX_FILES = 40
+ZIP_MAX_TOTAL_MB = 15
 
 
 def _child_limits():
@@ -36,7 +43,6 @@ def _child_limits():
 
 
 def _pid_alive(pid):
-    """هل العملية دي حية؟"""
     if not pid:
         return False
     try:
@@ -46,12 +52,103 @@ def _pid_alive(pid):
         return False
 
 
+def mem_usage_mb(pid):
+    """استهلاك الذاكرة الحقيقي للعملية من /proc."""
+    try:
+        with open(f"/proc/{int(pid)}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except Exception:
+        pass
+    return None
+
+
+def system_memory_mb():
+    """ذاكرة السيرفر الكلية والمتاحة."""
+    total = avail = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = round(int(line.split()[1]) / 1024)
+                elif line.startswith("MemAvailable:"):
+                    avail = round(int(line.split()[1]) / 1024)
+    except Exception:
+        pass
+    return total, avail
+
+
+def fmt_size(n):
+    if n is None:
+        return "?"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n/1024:.1f} KB"
+    return f"{n/1024/1024:.1f} MB"
+
+
+def dir_size(path):
+    total = 0
+    try:
+        for p in Path(path).rglob("*"):
+            if p.is_file():
+                total += p.stat().st_size
+    except Exception:
+        pass
+    return total
+
+
+def unpack_zip(data: bytes, dest: Path):
+    """
+    استخراج آمن لمشروع مضغوط (zip) متعدد الملفات.
+    بيرجع (اسم ملف التشغيل، هل فيه requirements.txt).
+    """
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    names = [i for i in zf.infolist() if not i.is_dir()]
+    if len(names) > ZIP_MAX_FILES:
+        raise ValueError(f"الملف فيه {len(names)} عنصر — الحد {ZIP_MAX_FILES}")
+    if sum(i.file_size for i in names) > ZIP_MAX_TOTAL_MB * 1024 * 1024:
+        raise ValueError(f"محتوى الضغط أكبر من {ZIP_MAX_TOTAL_MB} ميجا")
+
+    # لو كل الملفات جوه مجلد واحد — نشيل البادئة
+    tops = {n.filename.split("/")[0] for n in names}
+    strip = ""
+    if len(tops) == 1 and "/" in names[0].filename:
+        strip = list(tops)[0] + "/"
+
+    dest.mkdir(parents=True, exist_ok=True)
+    py_files, reqs = [], False
+    for info in names:
+        rel = info.filename[len(strip):] if strip and info.filename.startswith(strip) else info.filename
+        rel = rel.lstrip("/")
+        if not rel or ".." in rel.split("/"):
+            continue  # حماية من path traversal
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(zf.read(info))
+        if rel == "requirements.txt":
+            reqs = True
+        elif rel.endswith(".py"):
+            py_files.append(rel)
+
+    if not py_files:
+        raise ValueError("مفيش أي ملف .py جوه الضغط!")
+
+    # ملف التشغيل: main.py ثم bot.py ثم app.py ثم run.py ثم أول .py
+    for cand in ("main.py", "bot.py", "app.py", "run.py"):
+        if cand in py_files:
+            return cand, reqs
+    return sorted(py_files)[0], reqs
+
+
 class HostedBot:
     def __init__(self, bot_id, meta):
         self.id = bot_id
         self.meta = meta
         self.dir = BOTS_DIR / bot_id
-        self.process = None  # بيتملي لو إحنا اللي شغلناه في الجلسة دي
+        self.process = None
 
     # ---------- مسارات ----------
     @property
@@ -92,6 +189,24 @@ class HostedBot:
         except Exception:
             return None
 
+    # ---------- معلومات ----------
+    @property
+    def running(self):
+        if self.process is not None:
+            return self.process.poll() is None
+        return _pid_alive(self.meta.get("pid"))
+
+    def mem_mb(self):
+        pid = None
+        if self.process is not None and self.process.poll() is None:
+            pid = self.process.pid
+        elif self.running:
+            pid = self.meta.get("pid")
+        return mem_usage_mb(pid) if pid else None
+
+    def size_bytes(self):
+        return dir_size(self.dir)
+
     # ---------- التثبيت ----------
     def install(self):
         if not self.req_file.exists():
@@ -111,14 +226,6 @@ class HostedBot:
         except subprocess.TimeoutExpired:
             return False, f"تثبيت المكتبات اخد وقت أطول من {INSTALL_TIMEOUT} ثانية واتوقف"
 
-    # ---------- الحالة الحقيقية ----------
-    @property
-    def running(self):
-        # إما إحنا شغلناه من شوية (في نفس الجلسة) أو فيه PID محفوظ لسه حي
-        if self.process is not None:
-            return self.process.poll() is None
-        return _pid_alive(self.meta.get("pid"))
-
     # ---------- التشغيل ----------
     def start(self):
         if self.running:
@@ -129,7 +236,7 @@ class HostedBot:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.libs_dir.resolve()) if self.libs_dir.exists() else ""
         env["PYTHONUNBUFFERED"] = "1"
-        # نحقن رقم صاحب البوت كأدمن — بوتات كتير (متاجر وغيرها) بتقرا ADMIN_ID من البيئة
+        # نحقن رقم صاحب البوت كأدمن لبوتاته
         owner = str(self.meta.get("owner_id") or "")
         if owner:
             env["ADMIN_ID"] = owner
@@ -152,9 +259,19 @@ class HostedBot:
         )
         self.meta["pid"] = self.process.pid
         self.meta["auto_run"] = True
+        self.meta["starts"] = self.meta.get("starts", 0) + 1
+        self.meta["last_start"] = time.strftime("%Y-%m-%d %H:%M")
         self.save_meta()
         persist.push_bot_async(self)
         return True, "اتشغّل ✅"
+
+    def restart(self):
+        """إعادة تشغيل: إيقاف إن كان شغال ثم تشغيل."""
+        was = self.running
+        if was:
+            self.stop()
+            time.sleep(1)
+        return self.start()
 
     def stop(self):
         self.meta["auto_run"] = False
@@ -172,7 +289,6 @@ class HostedBot:
             self.process = None
             return False, "البوت مش شغال أصلاً"
 
-        # إيقاف مجموعة العملية كلها (البوت + أي أبناء له)
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
         except Exception:
@@ -181,7 +297,6 @@ class HostedBot:
             except Exception:
                 pass
 
-        # نستنى لحد 4 ثواني وبعدين قتل قسري
         for _ in range(20):
             if not _pid_alive(pid):
                 break
@@ -218,8 +333,10 @@ class HostedBot:
 
 
 class BotManager:
-    def __init__(self, max_bots=3):
+    def __init__(self, max_bots=8, max_running=4, per_user=3):
         self.max_bots = max_bots
+        self.max_running = max_running
+        self.per_user = per_user
 
     def list_bots(self, owner_id=None):
         bots = []
@@ -233,30 +350,45 @@ class BotManager:
                 bots.append(b)
         return bots
 
+    def running_count(self):
+        return sum(1 for b in self.list_bots() if b.running)
+
+    def users_count(self):
+        return len({b.meta.get("owner_id") for b in self.list_bots()})
+
     @staticmethod
     def get(bot_id):
         if not bot_id or not bot_id.replace("-", "").isalnum():
             return None
         return HostedBot.load(bot_id)
 
-    def create(self, owner_id, owner_name, filename, content_bytes):
+    def allocate(self, owner_id, owner_name, display_name):
+        """فحص الحدود وتجهيز بوت جديد (من غير ملفات — الملف اللي بعدها)."""
         count = len(self.list_bots(owner_id))
         total = len(self.list_bots())
         if total >= self.max_bots:
-            return None, f"وصلنا الحد الأقصى للبوتات ({self.max_bots}) — امسح واحدة الأول"
-        if count >= 2:
-            return None, "الحد الأقصى ليك بوتين — امسح واحد لو عايز ترفع غيره"
+            return None, f"السعة ممتلئة ({self.max_bots} بوت) — امسح واحدة أو كلم الأدمن"
+        if count >= self.per_user:
+            return None, f"الحد الأقصى ليك {self.per_user} بوتات — امسح واحد لو عايز ترفع غيره"
 
-        bot_id = f"b{int(time.time())}{owner_id % 1000}"
+        bot_id = f"b{int(time.time())}{owner_id % 1000}{random.randint(10,99)}"
         bot = HostedBot(bot_id, {
-            "name": filename,
+            "name": display_name,
             "owner_id": owner_id,
             "owner_name": owner_name,
             "file": "main.py",
             "pid": None,
             "auto_run": False,
+            "starts": 0,
+            "created": time.strftime("%Y-%m-%d %H:%M"),
         })
         bot.dir.mkdir(parents=True, exist_ok=True)
+        return bot, None
+
+    def create(self, owner_id, owner_name, filename, content_bytes):
+        bot, err = self.allocate(owner_id, owner_name, filename)
+        if err:
+            return None, err
         bot.main_file.write_bytes(content_bytes)
         bot.save_meta()
         persist.push_bot_async(bot)
@@ -270,7 +402,7 @@ class BotManager:
                 continue
             try:
                 if _pid_alive(b.meta.get("pid")):
-                    continue  # شغال فعلاً — مفيش حاجة
+                    continue
                 if b.req_file.exists() and not b.libs_dir.exists():
                     ok, _ = b.install()
                     if not ok:
