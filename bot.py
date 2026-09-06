@@ -434,7 +434,7 @@ def panel_kb():
             InlineKeyboardButton("النظام", callback_data="psys", style="primary"),
             InlineKeyboardButton("صيانة", callback_data="pmaint"),
         ],
-        [InlineKeyboardButton("الطلبات المستنية", callback_data="papps", style="secondary")],
+        [InlineKeyboardButton("الطلبات المستنية", callback_data="papps")],
         [InlineKeyboardButton("إذاعة للمستخدمين", callback_data="pbcast", style="primary")],
         [InlineKeyboardButton("تحديث اللوحة", callback_data="panel")],
     ])
