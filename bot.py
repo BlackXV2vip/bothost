@@ -7,6 +7,9 @@ import asyncio
 import html
 import json
 import os
+import random
+import shutil
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,6 +44,12 @@ MAX_ZIP_MB = 8
 MAIN_START = time.time()
 
 ADMIN_FILE = Path("storage/admin.json")
+USERS_FILE = Path("storage/users.json")
+PENDING_DIR = Path("storage/pending")
+APPROVAL_REQUIRED = os.environ.get("APPROVAL_REQUIRED", "true").lower() == "true"
+USERS = {}              # uid_str -> {name, username, joined, last}
+USERS_DIRTY = False
+APP = None              # التطبيق العالمي (للإرسال لأي شات)
 manager = BotManager(max_bots=MAX_BOTS, max_running=MAX_RUNNING, per_user=PER_USER)
 
 INSTALLING = set()      # بوتات في مرحلة تثبيت
@@ -76,6 +85,91 @@ def save_admin(uid):
 
 def is_admin(uid):
     return uid in ADMIN_IDS
+
+
+# ============================================================
+# سجل المستخدمين — الإحصائية الحقيقية
+# ============================================================
+def load_users():
+    global USERS
+    if USERS_FILE.exists():
+        try:
+            USERS = json.loads(USERS_FILE.read_text())
+        except Exception:
+            USERS = {}
+
+
+def register_user(u):
+    """تسجيل أي حد يكلم البوت — عشان الإحصائية والإذاعة."""
+    global USERS_DIRTY
+    key = str(u.id)
+    now = int(time.time())
+    rec = USERS.get(key)
+    if rec is None:
+        USERS[key] = {"name": (getattr(u, "first_name", "") or "")[:50],
+                      "username": (getattr(u, "username", "") or ""),
+                      "joined": now, "last": now}
+        USERS_DIRTY = True
+    elif now - rec.get("last", 0) > 300:
+        rec["last"] = now
+        un = getattr(u, "username", None)
+        if un and rec.get("username") != un:
+            rec["username"] = un
+        USERS_DIRTY = True
+    if USERS_DIRTY:
+        try:
+            USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            USERS_FILE.write_text(json.dumps(USERS, ensure_ascii=False))
+            USERS_DIRTY = False
+            if persist.ENABLED:
+                threading.Thread(target=persist.push_app_file,
+                                 args=("users.json", USERS_FILE.read_bytes()), daemon=True).start()
+        except Exception:
+            pass
+
+
+def _pending_list():
+    if not PENDING_DIR.exists():
+        return []
+    out = []
+    for m in sorted(PENDING_DIR.glob("*.json")):
+        try:
+            out.append(json.loads(m.read_text()))
+        except Exception:
+            pass
+    return out
+
+
+def _pending_card(p):
+    kind = "مشروع zip" if p.get("kind") == "zip" else "ملف بايثون"
+    return (f"📥 <b>طلب رفع جديد — محتاج موافقتك</b>\n"
+            f"🧑 من: {esc(p.get('uname', '?'))} | <code>{p.get('uid')}</code>\n"
+            f"📄 الملف: <b>{esc(p.get('fname', '?'))}</b> ({fmt_size(p.get('size', 0))})\n"
+            f"🏷 النوع: {kind}")
+
+
+async def _notify_new_pending(app, p, data: bytes):
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("موافقة ونشر", callback_data=f"appr_{p['pid']}", style="success"),
+        InlineKeyboardButton("رفض", callback_data=f"rej_{p['pid']}", style="danger"),
+    ]])
+    for aid in ADMIN_IDS:
+        try:
+            await app.bot.send_document(
+                aid, document=data, filename=p.get("fname", "file"),
+                caption=_pending_card(p), parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception:
+            pass
+
+
+def _save_pending(u, name, kind, data: bytes) -> dict:
+    pid = f"p{int(time.time())}{random.randint(100, 999)}"
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    (PENDING_DIR / f"{pid}.{kind}").write_bytes(data)
+    meta = {"pid": pid, "uid": u.id, "uname": u.first_name or "مستخدم",
+            "fname": name, "size": len(data), "kind": kind, "ts": time.time()}
+    (PENDING_DIR / f"{pid}.json").write_text(json.dumps(meta, ensure_ascii=False))
+    return meta
 
 
 load_admins()
@@ -198,6 +292,7 @@ async def sync_data_job(context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 async def cmd_start(update: Update, ctx):
     was_set = first_admin_hook(update)
+    register_user(update.effective_user)
     admin = is_admin(update.effective_user.id)
     admin_note = "\n👑 إنت الأدمن في المنصة" if was_set or admin else ""
     # نشيل أي كيبورد قديم من النسخ اللي فاتت
@@ -311,11 +406,16 @@ def panel_text():
     mem_line = f"{used}/{total_mem} MB (متاح {avail_mem})" if total_mem else "؟"
     size = sum(b.size_bytes() for b in bots)
     starts = sum(b.meta.get("starts", 0) for b in bots)
+    owners = len({b.meta.get("owner_id") for b in bots if b.meta.get("owner_id")})
+    pending = len(_pending_list())
+    policy = "بموافقة الإدارة 🔐" if APPROVAL_REQUIRED else ("مفتوح" if OPEN_UPLOADS else "للأدمن بس")
     return (
         "🖥 <b>لوحة تحكم بوت هوست</b>\n"
         "═══════════════\n"
         f"🤖 البوتات: <b>{len(bots)}/{MAX_BOTS}</b> (🟢 {running})\n"
-        f"👥 المستخدمون: {manager.users_count()}\n"
+        f"👥 المستخدمون: <b>{len(USERS)}</b> (أصحاب بوتات: {owners})\n"
+        f"📥 طلبات مستنية: <b>{pending}</b>\n"
+        f"🔐 سياسة الرفع: {policy}\n"
         f"▶️ إجمالي التشغيلات: {starts}\n"
         f"⏱ مدة تشغيل السيرفر: {fmt_uptime()}\n"
         f"💾 ذاكرة السيرفر: {mem_line}\n"
@@ -334,6 +434,7 @@ def panel_kb():
             InlineKeyboardButton("النظام", callback_data="psys", style="primary"),
             InlineKeyboardButton("صيانة", callback_data="pmaint"),
         ],
+        [InlineKeyboardButton("الطلبات المستنية", callback_data="papps", style="secondary")],
         [InlineKeyboardButton("إذاعة للمستخدمين", callback_data="pbcast", style="primary")],
         [InlineKeyboardButton("تحديث اللوحة", callback_data="panel")],
     ])
@@ -385,8 +486,8 @@ def maint_kb():
 # ============================================================
 # استقبال الملفات
 # ============================================================
-async def _offer_start(b, pkgs, extra=""):
-    """شاشة ما بعد الرفع: أزرار التثبيت/التشغيل."""
+async def _offer_start(b, pkgs, extra="", chat_id=None):
+    """شاشة ما بعد الرفع: أزرار التثبيت/التشغيل (لرسالة الرفع أو شات المالك)."""
     if pkgs:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"ثبّتها وشغّل ({len(pkgs)} مكتبة)", callback_data=f"inst_{b.id}", style="success")],
@@ -395,7 +496,9 @@ async def _offer_start(b, pkgs, extra=""):
                 InlineKeyboardButton("هكتبها بنفسي", callback_data=f"waitreq_{b.id}"),
             ],
         ])
-        await b._msg.reply_text(
+        dest = b._msg.reply_text if b._msg is not None else (
+            lambda *a, **k: APP.bot.send_message(chat_id or b.meta.get("owner_id"), *a, **k))
+        await dest(
             f"✅ استلمت <b>{esc(b.meta['name'])}</b>{extra}\n"
             f"🔍 <b>لقيت المكتبات دي:</b>\n<code>{esc(', '.join(pkgs))}</code>\n\n"
             "دوس الزرار وأنا أثبتهم وأشغّل 👇",
@@ -414,7 +517,9 @@ async def on_document(update: Update, ctx):
     doc = update.message.document
     name = doc.file_name or "file.txt"
 
-    if not (is_admin(u.id) or OPEN_UPLOADS):
+    register_user(u)
+    needs_approval = not is_admin(u.id) and APPROVAL_REQUIRED
+    if not (is_admin(u.id) or OPEN_UPLOADS or APPROVAL_REQUIRED):
         await update.message.reply_text("⛔️ الرفع للأدمن بس دلوقتي — كلّم صاحب البوت")
         return
 
@@ -452,11 +557,30 @@ async def on_document(update: Update, ctx):
         if doc.file_size > MAX_ZIP_MB * 1024 * 1024:
             await update.message.reply_text(f"⚠️ الملف أكبر من {MAX_ZIP_MB} ميجا")
             return
+        data = await tg_download(doc)
+        if needs_approval:
+            # فحص سريع إن المشروع سليم قبل ما يوصل للإدارة
+            tmp = Path(tempfile.mkdtemp())
+            try:
+                await asyncio.to_thread(unpack_zip, bytes(data), tmp)
+            except ValueError as e:
+                await update.message.reply_text(f"⚠️ {esc(str(e))}")
+                return
+            except Exception:
+                await update.message.reply_text("❌ ملف الضغط فيه مشكلة")
+                return
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            meta = _save_pending(u, name, "zip", bytes(data))
+            await _notify_new_pending(ctx.application, meta, bytes(data))
+            await update.message.reply_text(
+                "📥 استلمت مشروعك ✅\n🔐 هيراجعه فريق الإدارة ويوصلك رد هنا حالاً",
+                parse_mode=ParseMode.HTML)
+            return
         bot, err = manager.allocate(u.id, u.first_name or "مستخدم", name)
         if err:
             await update.message.reply_text(f"⚠️ {err}")
             return
-        data = await tg_download(doc)
         try:
             entry, reqs = await asyncio.to_thread(unpack_zip, bytes(data), bot.dir)
         except ValueError as e:
@@ -488,6 +612,21 @@ async def on_document(update: Update, ctx):
         return
 
     data = await tg_download(doc)
+    if needs_approval:
+        # فحص سينتاكس سريع — نرفض الملفات البايظة فوراً
+        try:
+            compile(bytes(data).decode("utf-8", errors="replace"), name, "exec")
+        except SyntaxError as e:
+            await update.message.reply_text(
+                f"❌ في خطأ سينتاكس في الملف (سطر {e.lineno}):\n<code>{esc(str(e.msg))}</code>\nعدّله وابعته تاني",
+                parse_mode=ParseMode.HTML)
+            return
+        meta = _save_pending(u, name, "py", bytes(data))
+        await _notify_new_pending(ctx.application, meta, bytes(data))
+        await update.message.reply_text(
+            "📥 استلمت بوتك ✅\n🔐 هيراجعه فريق الإدارة ويوصلك رد هنا حالاً",
+            parse_mode=ParseMode.HTML)
+        return
     bot, err = manager.create(u.id, u.first_name or "مستخدم", name, bytes(data))
     if err:
         await update.message.reply_text(f"⚠️ {err}")
@@ -527,7 +666,8 @@ async def do_broadcast(q, ctx):
     if text is None:
         await q.edit_message_text("⚠️ مفيش نص محفوظ — ابدأ من اللوحة تاني")
         return
-    users = {b.meta.get("owner_id") for b in manager.list_bots() if b.meta.get("owner_id")}
+    users = {int(k) for k in USERS.keys() if str(k).isdigit()}
+    users |= {b.meta.get("owner_id") for b in manager.list_bots() if b.meta.get("owner_id")}
     users |= ADMIN_IDS
     await q.edit_message_text(f"📡 ببعت لـ {len(users)} مستخدم...")
     ok = fail = 0
@@ -568,6 +708,7 @@ async def start_and_report(q, b):
 
 async def on_button(update: Update, ctx):
     q = update.callback_query
+    register_user(q.from_user)
     await q.answer()
     uid = q.from_user.id
     data = q.data
@@ -621,7 +762,7 @@ async def on_button(update: Update, ctx):
     # ---------- لوحة الأدمن ----------
     if data == "noop":
         return
-    if data in ("panel", "pstats", "psys", "pmaint", "pbcast", "bcast_go", "bcast_no",
+    if data in ("panel", "pstats", "psys", "pmaint", "pbcast", "bcast_go", "bcast_no", "papps",
                 "mrestart", "mstopall", "msync") or data.startswith("pbots_") or data.startswith("pbot_"):
         if not is_admin(uid):
             await q.answer("⛔️ للأدمن بس!", show_alert=True)
@@ -629,6 +770,103 @@ async def on_button(update: Update, ctx):
 
     if data == "panel":
         await q.edit_message_text(panel_text(), parse_mode=ParseMode.HTML, reply_markup=panel_kb())
+        return
+
+    if data == "papps":
+        items = _pending_list()
+        if not items:
+            await q.edit_message_text(
+                "📭 مفيش طلبات رفع مستنية الموافقة",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع للوحة", callback_data="panel")]]))
+            return
+        txt = [f"📥 <b>الطلبات المستنية ({len(items)}):</b>\n"]
+        rows = []
+        for i, pmeta in enumerate(items, 1):
+            txt.append(f"{i}. <b>{esc(pmeta['fname'])}</b> — {esc(pmeta.get('uname'))} "
+                       f"(<code>{pmeta.get('uid')}</code>) — {fmt_size(pmeta.get('size', 0))}")
+            rows.append([
+                InlineKeyboardButton(f"موافقة {i}", callback_data=f"appr_{pmeta['pid']}", style="success"),
+                InlineKeyboardButton(f"رفض {i}", callback_data=f"rej_{pmeta['pid']}", style="danger"),
+            ])
+        rows.append([InlineKeyboardButton("رجوع للوحة", callback_data="panel")])
+        await q.edit_message_text("\n".join(txt), parse_mode=ParseMode.HTML,
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    # ===== الموافقة / الرفض =====
+    if data.startswith(("appr_", "rej_")):
+        if not is_admin(uid):
+            await q.answer("للأدمن بس", show_alert=True)
+            return
+        pid = data.split("_", 1)[1]
+        meta_f = PENDING_DIR / f"{pid}.json"
+        if not meta_f.exists():
+            await q.edit_message_text("⚠️ الطلب ده اتعالج قبل كده")
+            return
+        pmeta = json.loads(meta_f.read_text())
+        fpath = PENDING_DIR / f"{pid}.{pmeta['kind']}"
+
+        # ---------- رفض ----------
+        if data.startswith("rej_"):
+            try:
+                await ctx.bot.send_message(
+                    pmeta["uid"],
+                    f"❌ الإدارة رفضت الملف <b>{esc(pmeta['fname'])}</b>\nعدّله وجرب تاني، أو كلّم الإدارة",
+                    parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+            if fpath.exists():
+                fpath.unlink()
+            meta_f.unlink()
+            await q.edit_message_text("🚫 الطلب اترفض واتبلغ صاحبه")
+            return
+
+        # ---------- موافقة ----------
+        if not fpath.exists():
+            await q.edit_message_text("⚠️ ملف الطلب ضايع — ارفضه وخليه يبعت تاني")
+            return
+        data_bytes = fpath.read_bytes()
+        owner_id = pmeta["uid"]
+        owner_name = pmeta.get("uname", "مستخدم")
+        fname = pmeta["fname"]
+        try:
+            if pmeta["kind"] == "zip":
+                bot, err = manager.allocate(owner_id, owner_name, fname)
+                if err:
+                    await q.edit_message_text(f"⚠️ {err} — الملف لسه في الانتظار")
+                    return
+                entry, reqs = await asyncio.to_thread(unpack_zip, data_bytes, bot.dir)
+                bot.meta["file"] = entry
+                bot.save_meta()
+                persist.push_bot_async(bot)
+                nfiles = len([x for x in bot.dir.rglob("*") if x.is_file()])
+                code = bot.main_file.read_text(encoding="utf-8", errors="replace")
+                pkgs = detect_packages(code)
+                bot._msg = None
+                await _offer_start(bot, pkgs, chat_id=owner_id,
+                                   extra=f"\n🎓 <b>مشروع كامل!</b> {nfiles} ملف — ملف التشغيل: <code>{esc(entry)}</code>")
+            else:
+                bot, err = manager.create(owner_id, owner_name, fname, data_bytes)
+                if err:
+                    await q.edit_message_text(f"⚠️ {err} — الملف لسه في الانتظار")
+                    return
+                pkgs = detect_packages(data_bytes.decode("utf-8", errors="replace"))
+                bot._msg = None
+                await _offer_start(bot, pkgs, chat_id=owner_id)
+        except Exception as e:
+            await q.edit_message_text(f"❌ فشل النشر: {esc(str(e)[:120])}")
+            return
+        # نجاح — نمسح الانتظار ونبلّغ الطرفين
+        if fpath.exists():
+            fpath.unlink()
+        meta_f.unlink()
+        try:
+            await ctx.bot.send_message(owner_id,
+                "✅ <b>موافقة الإدارة وصلت!</b>\nبوتك تحت — ظبطه من الأزرار 👇",
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await q.edit_message_text("✅ اتنشر وبعت رسالة لصاحبه بالأزرار")
         return
 
     if data == "pstats":
@@ -826,8 +1064,26 @@ def main():
             BotCommand("id", "رقمك"),
             BotCommand("panel", "لوحة التحكم (أدمن)"),
         ])
+        n = len(_pending_list())
+        if n:
+            for aid in ADMIN_IDS:
+                try:
+                    await app.bot.send_message(aid, f"📥 عندك {n} طلب رفع مستني موافقتك — /panel → الطلبات المستنية")
+                except Exception:
+                    pass
+
+    global APP
+    load_users()
+    if not USERS_FILE.exists() and persist.ENABLED:
+        blob = persist.pull_app_file("users.json")
+        if blob:
+            USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            USERS_FILE.write_bytes(blob)
+        load_users()
+        print(f"👥 السجل اترجع من السحابة: {len(USERS)} مستخدم")
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    APP = app
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))

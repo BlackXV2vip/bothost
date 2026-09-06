@@ -74,6 +74,31 @@ def push_bot_sync(bot, data_only=False):
             print(f"⚠️ persist push {bot.id}/{rel}: {e}")
 
 
+def push_app_file(relpath, data_bytes):
+    """رفع ملف عام بتاع التطبيق (زي users.json) — برة مجلد البوتات."""
+    if not ENABLED:
+        return False
+    try:
+        return _put_file(f"app/{relpath}", data_bytes, f"app sync {relpath}")
+    except Exception as e:
+        print(f"⚠️ persist push_app {relpath}: {e}")
+        return False
+
+
+def pull_app_file(relpath):
+    """ترجيع ملف عام — bytes أو None."""
+    if not ENABLED:
+        return None
+    try:
+        r = httpx.get(f"{API}/repos/{REPO}/contents/app/{relpath}",
+                      headers=_headers(), timeout=30)
+        if r.status_code == 200:
+            return base64.b64decode(r.json().get("content", ""))
+    except Exception as e:
+        print(f"⚠️ persist pull_app {relpath}: {e}")
+    return None
+
+
 def push_bot_async(bot):
     if ENABLED:
         threading.Thread(target=push_bot_sync, args=(bot,), daemon=True).start()
