@@ -160,6 +160,28 @@ async def self_ping(context: ContextTypes.DEFAULT_TYPE):
 
 
 # مزامنة دورية لبيانات البوتات الشغالة (حتى ما تضيعش مع أي إعادة نشر)
+import time as _time
+HEARTBEAT = {"t": _time.time()}
+
+
+async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
+    """بينبض من جوه اللوب — لو اللوب اتجمد النبضة بتقف."""
+    HEARTBEAT["t"] = _time.time()
+
+
+def _watchdog():
+    """لو النبضة وقفت 10 دقايق = اللوب ميت → اقتل العملية عشان Render يبعته جديد."""
+    import os
+    import sys
+    while True:
+        _time.sleep(60)
+        stale = _time.time() - HEARTBEAT["t"]
+        if stale > 600:
+            print(f"💀 WATCHDOG: اللوب متجمد من {int(stale)} ثانية — إعادة تشغيل قسرية", flush=True)
+            sys.stdout.flush()
+            os._exit(1)
+
+
 async def sync_data_job(context: ContextTypes.DEFAULT_TYPE):
     if not persist.ENABLED:
         return
@@ -826,6 +848,8 @@ def main():
             print(f"⚠️ resume: {e}")
     threading.Thread(target=_resume, daemon=True).start()
 
+    if app.job_queue:
+        app.job_queue.run_repeating(heartbeat_job, interval=60, first=30)
     if RENDER_URL and app.job_queue:
         app.job_queue.run_repeating(self_ping, interval=600, first=120)
         print(f"🔄 self-ping على {RENDER_URL}")
@@ -833,6 +857,8 @@ def main():
         print("☁️ مزامنة بيانات دورية كل 5 دقايق")
 
     print("🤖 بوت هوست v3 شغال!")
+    threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
+    print("🐕 الحارس شغال — أي تجمد فوق 10 دقايق = إعادة تشغيل", flush=True)
     app.run_polling(allowed_updates=["message", "callback_query"])
 
 
