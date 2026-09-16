@@ -258,9 +258,32 @@ import time as _time
 HEARTBEAT = {"t": _time.time()}
 
 
+POLL_DEAD = {"n": 0}
+
+
 async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
-    """بينبض من جوه اللوب — لو اللوب اتجمد النبضة بتقف."""
+    """نبضة اللوب + حارس مهمة الـ polling نفسها (اللي ممكن تمات واللوب يعيش)."""
     HEARTBEAT["t"] = _time.time()
+    try:
+        app = context.application
+        updater = getattr(app, "updater", None)
+        task = getattr(updater, "_polling_task", None) if updater else None
+        # خلال أول 3 دقايق بعد الإقلاع مفيش حكم
+        if _time.time() - MAIN_START < 180:
+            POLL_DEAD["n"] = 0
+            return
+        if task is None or task.done():
+            POLL_DEAD["n"] += 1
+            print(f"🚨 مهمة الـ polling ماتت ({POLL_DEAD['n']}/2) — لو تكررت هنعيد التشغيل", flush=True)
+            if POLL_DEAD["n"] >= 2:
+                import sys
+                print("💀 WATCHDOG-POLL: الـ polling ميت — إعادة تشغيل قسرية", flush=True)
+                sys.stdout.flush()
+                os._exit(1)
+        else:
+            POLL_DEAD["n"] = 0
+    except Exception as e:
+        print(f"⚠️ poll-watchdog: {e}", flush=True)
 
 
 def _watchdog():
