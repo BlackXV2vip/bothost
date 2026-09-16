@@ -231,7 +231,8 @@ def _bots_status():
     out = []
     for b in manager.list_bots():
         try:
-            tail = b.logs(30)[-1200:]
+            full = b.logs(60)
+            tail = (full[:900] + "\n...[وسط اللوج]...\n" + full[-900:]) if len(full) > 1800 else full[-1200:]
         except Exception:
             tail = ""
         out.append({
