@@ -21,7 +21,7 @@ BOTS_DIR = BASE_DIR / "bots"
 BOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 INSTALL_TIMEOUT = 300      # أقصى مدة تثبيت مكتبات (ثواني)
-MEM_LIMIT_MB = 150         # أقصى ذاكرة لبوت واحد
+MEM_LIMIT_MB = int(os.environ.get("MEM_LIMIT_MB", "400"))  # أقصى ذاكرة لبوت واحد
 MAX_LOG_BYTES = 100_000    # أقصى حجم لوج محفوظ
 
 # حدود مشاريع الـ zip
