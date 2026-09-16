@@ -236,6 +236,12 @@ class HostedBot:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.libs_dir.resolve()) if self.libs_dir.exists() else ""
         env["PYTHONUNBUFFERED"] = "1"
+        # بروكسي الخروج (لو مضبوط) — تليجرام بيمشي مباشر والباقي ع via البروكسي
+        proxy = os.environ.get("OUTBOUND_PROXY", "")
+        if proxy:
+            env["HTTP_PROXY"] = env["HTTPS_PROXY"] = env["ALL_PROXY"] = proxy
+            env["http_proxy"] = env["https_proxy"] = proxy
+            env["NO_PROXY"] = "api.telegram.org,localhost,127.0.0.1,t.me"
         # نحقن رقم صاحب البوت كأدمن لبوتاته
         owner = str(self.meta.get("owner_id") or "")
         if owner:
