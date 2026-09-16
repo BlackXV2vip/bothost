@@ -271,6 +271,21 @@ class Health(BaseHTTPRequestHandler):
                     "pending": len(_pending_list()),
                     "uptime_s": int(time.time() - MAIN_START),
                 })
+            if action == "install":
+                bot_id = (qs.get("bot") or [""])[0]
+                b = manager.get(bot_id)
+                if not b:
+                    return self._json(404, {"error": "bot not found"})
+                import asyncio as _a
+                ok, out = b.install()
+                time.sleep(1)
+                if ok:
+                    b.stop()
+                    ok2, _ = b.start()
+                    time.sleep(2)
+                    return self._json(200, {"install": "✅", "started": ok2,
+                                            "running": bool(b.running), "log": b.logs(15)[-800:]})
+                return self._json(200, {"install": "❌", "out": str(out)[-600:]})
             if action in ("restart", "start", "stop"):
                 bot_id = (qs.get("bot") or [""])[0]
                 if bot_id:
