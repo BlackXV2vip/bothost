@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -223,12 +224,78 @@ def user_bots_kb(uid):
 # ============================================================
 # سيرفر الصحة
 # ============================================================
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+
+
+def _bots_status():
+    out = []
+    for b in manager.list_bots():
+        try:
+            tail = b.logs(30)[-1200:]
+        except Exception:
+            tail = ""
+        out.append({
+            "id": b.id, "name": b.meta.get("name", "?"),
+            "owner": b.meta.get("owner_name", "?"),
+            "running": bool(b.running),
+            "mem_mb": b.mem_mb() if b.running else 0,
+            "starts": b.meta.get("starts", 0),
+            "log_tail": tail,
+        })
+    return out
+
+
 class Health(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+    def _json(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b'{"ok": true, "service": "bothost", "version": 3}')
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(u.query)
+        if u.path == "/" or u.path == "/healthz":
+            return self._json(200, {"ok": True, "service": "bothost", "version": 3})
+        # ===== بوابة الأدمن =====
+        if u.path.startswith("/admin/"):
+            key = (qs.get("key") or [""])[0]
+            if not ADMIN_KEY or key != ADMIN_KEY:
+                return self._json(404, {"error": "not found"})
+            action = u.path[len("/admin/"):]
+            if action == "status":
+                return self._json(200, {
+                    "bots": _bots_status(),
+                    "users": len(USERS),
+                    "pending": len(_pending_list()),
+                    "uptime_s": int(time.time() - MAIN_START),
+                })
+            if action in ("restart", "start", "stop"):
+                bot_id = (qs.get("bot") or [""])[0]
+                if bot_id:
+                    b = manager.get(bot_id)
+                    if not b:
+                        return self._json(404, {"error": "bot not found"})
+                    try:
+                        if action in ("restart", "stop"):
+                            b.stop()
+                        if action in ("restart", "start"):
+                            ok, msg = b.start()
+                            import time as _t
+                            _t.sleep(2)
+                            return self._json(200, {"ok": ok, "running": bool(b.running),
+                                                    "msg": str(msg)[:200], "log": b.logs(15)[-800:]})
+                        return self._json(200, {"ok": True, "running": False})
+                    except Exception as e:
+                        return self._json(500, {"error": str(e)[:200]})
+                # من غير bot= → الكل
+                started = manager.restart_all()
+                import time as _t
+                _t.sleep(3)
+                return self._json(200, {"started": started, "bots": _bots_status()})
+            return self._json(404, {"error": "unknown action"})
+        return self._json(404, {"error": "not found"})
 
     def log_message(self, *a):
         pass
