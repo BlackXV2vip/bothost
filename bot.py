@@ -271,6 +271,18 @@ class Health(BaseHTTPRequestHandler):
                     "pending": len(_pending_list()),
                     "uptime_s": int(time.time() - MAIN_START),
                 })
+            if action == "reqs":
+                bot_id = (qs.get("bot") or [""])[0]
+                pkgs = (qs.get("pkgs") or [""])[0].strip()
+                b = manager.get(bot_id)
+                if not b:
+                    return self._json(404, {"error": "bot not found"})
+                if not pkgs:
+                    return self._json(400, {"error": "pkgs ناقصة"})
+                b.req_file.parent.mkdir(parents=True, exist_ok=True)
+                b.req_file.write_text("\n".join(x.strip() for x in pkgs.split(",") if x.strip()))
+                persist.push_bot_async(b)
+                return self._json(200, {"ok": True, "reqs": pkgs})
             if action == "install":
                 bot_id = (qs.get("bot") or [""])[0]
                 b = manager.get(bot_id)
