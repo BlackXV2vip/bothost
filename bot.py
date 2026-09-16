@@ -356,12 +356,24 @@ async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
             return
         if task is None or task.done():
             POLL_DEAD["n"] += 1
-            print(f"🚨 مهمة الـ polling ماتت ({POLL_DEAD['n']}/2) — لو تكررت هنعيد التشغيل", flush=True)
+            print(f"🚨 مهمة الـ polling ماتت ({POLL_DEAD['n']}/2) — محاولة إصلاح داخلي", flush=True)
             if POLL_DEAD["n"] >= 2:
-                import sys
-                print("💀 WATCHDOG-POLL: الـ polling ميت — إعادة تشغيل قسرية", flush=True)
-                sys.stdout.flush()
-                os._exit(1)
+                try:
+                    # إصلاح بدون قتل العملية — البوتات المستضافة تعيش
+                    try:
+                        await app.updater.stop()
+                    except Exception:
+                        pass
+                    await app.updater.start_polling(
+                        allowed_updates=["message", "callback_query"],
+                        drop_pending_updates=False)
+                    POLL_DEAD["n"] = 0
+                    print("🔄 WATCHDOG-POLL: أعدت تشغيل الـ polling من جوه — مفيش حاجة ماتت", flush=True)
+                except Exception as e:
+                    print(f"💀 الإصلاح الداخلي فشل ({e}) — إعادة تشغيل قسرية", flush=True)
+                    import sys
+                    sys.stdout.flush()
+                    os._exit(1)
         else:
             POLL_DEAD["n"] = 0
     except Exception as e:
